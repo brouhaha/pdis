@@ -24,8 +24,15 @@ nil = 0xfc00
 
 image_addr = 0
 image_len = 0
-mem = [0] * 65536
-memusage = [None] * 65536
+mem = None
+memusage = None
+
+def mem_init():
+    global image_addr, image_len, mem, memusage
+    image_addr = 0
+    image_len = 0
+    mem = [0] * 65536
+    memusage = [None] * 65536
 
 optab     = { 0x00: ('sldc', 'literal', 0x00),
               0x01: ('sldc', 'literal', 0x01),
@@ -204,6 +211,16 @@ optab     = { 0x00: ('sldc', 'literal', 0x00),
               0xe6: ('ind', 'literal', 'b'),
               0xe7: ('inc', 'literal', 'b')
               }
+    
+def read_words(f, count):
+    global image_addr, image_len, mem
+    image_addr = 0
+    image_len = 0
+    while count:
+        bytes = f.read(2)
+        mem[image_addr + image_len] = (bytes[1] << 8) + bytes[0]
+        image_len += 1
+        count -= 1
     
 def read_rom(f):
     global image_addr, image_len, mem
@@ -514,8 +531,7 @@ def pass1_rom():
             sib = dis_sib(sys_seg[i], 'sib%d' % i, file = None)
             dis_seg(i, sib.segbase, sib.segleng, 'seg%d' % i, file = None)
 
-
-def pass2_rom(file, base, length):
+def pass2(file, base, length):
     addr = base
     while addr < base + length:
         usage = memusage[addr]
@@ -544,17 +560,120 @@ def pass2_rom(file, base, length):
         addr += usage[1]
 
 
+def get8(b, offset):
+    return b[offset]
+
+def get16(b, offset):
+    return b[offset] + (b[offset+1] << 8)
+
+def getalpha(b, offset):
+    a = ''
+    for i in range(8):
+        a += chr(b[offset + i])
+    return a
+
+
+SegInfo = collections.namedtuple('SegInfo', ['block',
+                                             'length',
+                                             'name',
+                                             'kind',
+                                             'addr',
+                                             'segnum',
+                                             'codeversion'])
+
+def get_code_seginfo(header, segnum):
+    block = get16(header, segnum * 4)
+    length = get16(header, segnum * 4 + 2)
+    name = getalpha(header, 0x040 + segnum * 8)
+    kind = get16(header, 0x0c0 + segnum * 2)
+    addr = get16(header, 0x0e0 + segnum * 2)
+    segnum = get8(header, 0x100 + segnum * 2)
+    codeversion = get8(header, 0x100 + segnum * 2 + 1)
+    return SegInfo(block  = block,
+                   length = length,
+                   name   = name,
+                   kind   = kind,
+                   addr   = addr,
+                   segnum = segnum,
+                   codeversion = codeversion)
+    
+
+def dis_codefile(cf, df):
+    verbose = False
+    header = cf.read(512)
+    seginfo = [get_code_seginfo(header, i) for i in range(16)]
+    seg_by_block = {}
+    for i in range(16):
+        if seginfo[i].block != 0:
+            seg_by_block[seginfo[i].block] = seginfo[i]
+    if verbose:
+        print('       blk  leng name     kind addr seg# cver')
+    for i in range(16):
+        s = seginfo [i]
+        if s.block != 0:
+            assert i == s.segnum
+        if verbose:
+            print('seg%02d: %04x %04x %s %04x %04x %04x %04x' % (i,
+                                                                 s.block,
+                                                                 s.length,
+                                                                 s.name,
+                                                                 s.kind,
+                                                                 s.addr,
+                                                                 s.segnum,
+                                                                 s.codeversion),
+              file = df)
+    if verbose:
+        print(file = df)
+
+    if verbose:
+        print('       blk  leng name     kind addr cver')
+    for block in sorted(seg_by_block.keys()):
+        s = seg_by_block[block]
+        assert block == s.block
+        if verbose:
+            print('seg%02d: %04x %04x %s %04x %04x %04x' % (s.segnum,
+                                                            s.block,
+                                                            s.length,
+                                                            s.name,
+                                                            s.kind,
+                                                            s.addr,
+                                                            s.codeversion),
+              file = df)
+    if verbose:
+        print(file = df)
+
+    expected_block = 1
+    for block in sorted(seg_by_block.keys()):
+        s = seg_by_block[block]
+        assert block == expected_block
+        block_count = (s.length + 255) // 256
+        #print(s.segnum, block, block_count)
+        expected_block += block_count
+        mem_init()
+        read_words(args.objectfile, block_count * 256)
+        name = s.name
+        if name == '        ':
+            name = 'seg%d' % s.segnum
+        dis_seg(s.segnum, 0, s.length, name, None)
+        pass2(df, 0, s.length)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('objectfile', type=argparse.FileType('rb'))
     parser.add_argument('disfile', type=argparse.FileType('w'), nargs='?', default = sys.stdout)
+    parser.add_argument('--rom', action='store_true', help='disassemble boot ROM')
     args = parser.parse_args()
 
-    read_rom(args.objectfile)
-    args.objectfile.close()
-
-    pass1_rom()
-
-    if args.disfile is not None:
-        pass2_rom(args.disfile, 0xf400, 0x200)
-
+    if args.rom:
+        mem_init()
+        read_rom(args.objectfile)
+        args.objectfile.close()
+        pass1_rom()
+        if args.disfile is not None:
+            pass2(args.disfile, 0xf400, 0x200)
+            args.disfile.close()
+    else:
+        dis_codefile(args.objectfile, args.disfile)
+        args.objectfile.close()
+        args.disfile.close()
