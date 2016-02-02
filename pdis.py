@@ -25,6 +25,7 @@ nil = 0xfc00
 image_addr = 0
 image_len = 0
 mem = [0] * 65536
+memusage = [None] * 65536
 
 optab     = { 0x00: ('sldc', 'literal', 0x00),
               0x01: ('sldc', 'literal', 0x01),
@@ -117,12 +118,12 @@ optab     = { 0x00: ('sldc', 'literal', 0x00),
               0x8e: ('stm',  'literal', 'ub'),
               0x8f: ('modi',),
 
-              0x90: ('cpl',  'proc', 'local', 'ub'),
-              0x91: ('cpg',  'proc', 'global', 'ub'),
-              0x92: ('cpi',  'proc', 'intermediate', 'db', 'ub'),
-              0x93: ('cxl',  'segment', 'proc', 'local', 'ub', 'ub'),
-              0x94: ('cxg',  'segment', 'proc', 'global', 'ub', 'ub'),
-              0x95: ('cxi',  'secment', 'proc', 'intermediate', 'ub', 'db', 'ub'),
+              0x90: ('cpl',  'local', 'proc', 'ub'),
+              0x91: ('cpg',  'global', 'proc', 'ub'),
+              0x92: ('cpi',  'intermediate', 'db', 'proc',  'ub'),
+              0x93: ('cxl',  'segment', 'ub', 'local', 'proc', 'ub'),
+              0x94: ('cxg',  'segment', 'ub', 'global', 'proc', 'ub'),
+              0x95: ('cxi',  'segment', 'ub', 'intermediate', 'db', 'proc', 'ub'),
               0x96: ('rpu',  'literal', 'b'),
               0x97: ('cpf',),
               0x98: ('ldcn',),
@@ -214,20 +215,20 @@ def read_rom(f):
         image_len += 1
         bytes = f.read(2)
 
-def get_word(addr, name, pr = False):
+def get_word(addr, name, file = None):
     w = mem[addr]
-    if pr:
-        print("%04x:  %04x  %s" % (addr, w, name))
+    if file is not None:
+        print("%04x:  %04x  %s" % (addr, w, name), file = file)
     return w
 
-def get_byte(addr, name, high, pr = False):
+def get_byte(addr, name, high, file = None):
     w = mem[addr]
     if high:
         b = w >> 8
     else:
         b = w & 0xff
-    if pr:
-        print("%04x%s: %02x    %s" % (addr, "LH"[int(high)], b, name))
+    if file is not None:
+        print("%04x%s: %02x    %s" % (addr, "LH"[int(high)], b, name), file = file)
     return b
 
 def get_byte_offset_addr_str(segbase, segname, byte_offset, procname):
@@ -237,7 +238,7 @@ def get_byte_offset_addr_str(segbase, segname, byte_offset, procname):
                                    segname, byte_offset,
                                    procname)
 
-def get_byte_offset(segbase, segname, byte_offset, procname, pr = False):
+def get_byte_offset(segbase, segname, byte_offset, procname, file = None):
     addr = segbase + (byte_offset >> 1)
     high = (byte_offset & 1) != 0
     w = mem[addr]
@@ -245,20 +246,34 @@ def get_byte_offset(segbase, segname, byte_offset, procname, pr = False):
         b = w >> 8
     else:
         b = w & 0xff
-    if pr:
+    if file is not None:
         print("%s: %02x" % (get_byte_offset_addr_str(segbase, segname,
                                                      byte_offset, procname),
-                            b))
+                            b),
+              file = file)
     return b
 
 
 
+def dis_boot_param_pointer(addr, name, file = None):
+    if memusage[addr] is None:
+        memusage[addr] = ['boot_param_pointer', 1]
+    else:
+        assert memusage[addr][0] == 'boot_param_pointer'
+
+    return get_word(addr, name, file)
+
 BootParams = collections.namedtuple('BootParams', ['ctp', 'sdp', 'rqp'])
 
-def get_boot_params(addr, name, pr = False):
-    ctp = get_word(addr + 0, name + '.ctp', pr = True)
-    sdp = get_word(addr + 1, name + '.sdp', pr = True)
-    rqp = get_word(addr + 2, name + '.rqp', pr = True)
+def dis_boot_params(addr, name, file = None):
+    if memusage[addr] is None:
+        memusage[addr] = ['boot_params', 3]
+    else:
+        assert memusage[addr][0] == 'boot_params'
+    
+    ctp = get_word(addr + 0, name + '.ctp', file)
+    sdp = get_word(addr + 1, name + '.sdp', file)
+    rqp = get_word(addr + 2, name + '.rqp', file)
     return BootParams(ctp = ctp, sdp = sdp, rqp = rqp)
     
 TIB = collections.namedtuple('TIB', ['waitq',
@@ -275,20 +290,25 @@ TIB = collections.namedtuple('TIB', ['waitq',
                                      'iorslt',
                                      'sibsvec'])
 
-def get_tib(addr, name, pr = False):
-    waitq   = get_word(addr +  0, name + '.waitq',        pr)
-    prior   = get_byte(addr +  1, name + '.prior', False, pr)
-    flags   = get_byte(addr +  1, name + '.flags', False, pr)
-    splow   = get_word(addr +  2, name + '.splow',        pr)
-    spupr   = get_word(addr +  3, name + '.spupr',        pr)
-    sp      = get_word(addr +  4, name + '.sp',           pr)
-    mp      = get_word(addr +  5, name + '.mp',           pr)
-    bp      = get_word(addr +  6, name + '.bp',           pr)
-    ipc     = get_word(addr +  7, name + '.ipc',          pr)
-    segb    = get_word(addr +  8, name + '.segb',         pr)
-    hangp   = get_word(addr +  9, name + '.hangp',        pr)
-    iorslt  = get_word(addr + 10, name + '.iorslt',       pr)
-    sibsvec = get_word(addr + 11, name + '.sibsvec',      pr)
+def dis_tib(addr, name, file = None):
+    if memusage[addr] is None:
+        memusage[addr] = ['tib', 12]
+    else:
+        assert memusage[addr][0] == 'tib'
+    
+    waitq   = get_word(addr +  0, name + '.waitq',        file)
+    prior   = get_byte(addr +  1, name + '.prior', False, file)
+    flags   = get_byte(addr +  1, name + '.flags', False, file)
+    splow   = get_word(addr +  2, name + '.splow',        file)
+    spupr   = get_word(addr +  3, name + '.spupr',        file)
+    sp      = get_word(addr +  4, name + '.sp',           file)
+    mp      = get_word(addr +  5, name + '.mp',           file)
+    bp      = get_word(addr +  6, name + '.bp',           file)
+    ipc     = get_word(addr +  7, name + '.ipc',          file)
+    segb    = get_word(addr +  8, name + '.segb',         file)
+    hangp   = get_word(addr +  9, name + '.hangp',        file)
+    iorslt  = get_word(addr + 10, name + '.iorslt',       file)
+    sibsvec = get_word(addr + 11, name + '.sibsvec',      file)
     return TIB(waitq   = waitq,
                prior   = prior,
                flags   = flags,
@@ -303,10 +323,15 @@ def get_tib(addr, name, pr = False):
                iorslt  = iorslt,
                sibsvec = sibsvec)
 
-def get_sibsvec(base, count, name, pr = False):
+def dis_sibsvec(addr, count, name, file = None):
+    if memusage[addr] is None:
+        memusage[addr] = ['sibsvec', count]
+    else:
+        assert memusage[addr][0] == 'sibsvec'
+    
     sibsvec = [0] * count
     for i in range(count):
-        sibsvec[i] = get_word(base + i, name + '[%d]' % i, pr)
+        sibsvec[i] = get_word(addr + i, name + '[%d]' % i, file)
     return sibsvec
 
 SIB = collections.namedtuple('SIB', ['segbase',
@@ -316,13 +341,18 @@ SIB = collections.namedtuple('SIB', ['segbase',
                                      'segunit',
                                      'prevsp'])
 
-def dis_sib(base, name, pr = False):
-    segbase = get_word(base + 0, name + '.segbase', pr)
-    segleng = get_word(base + 1, name + '.segleng', pr)
-    segrefs = get_word(base + 2, name + '.segrefs', pr)
-    segaddr = get_word(base + 3, name + '.segaddr', pr)
-    segunit = get_word(base + 4, name + '.segunit', pr)
-    prevsp  = get_word(base + 5, name + '.prevsp',  pr)
+def dis_sib(addr, name, file = None):
+    if memusage[addr] is None:
+        memusage[addr] = ['sib', 6]
+    else:
+        assert memusage[addr][0] == 'sib'
+    
+    segbase = get_word(addr + 0, name + '.segbase', file)
+    segleng = get_word(addr + 1, name + '.segleng', file)
+    segrefs = get_word(addr + 2, name + '.segrefs', file)
+    segaddr = get_word(addr + 3, name + '.segaddr', file)
+    segunit = get_word(addr + 4, name + '.segunit', file)
+    prevsp  = get_word(addr + 5, name + '.prevsp',  file)
     return SIB(segbase = segbase,
                segleng = segleng,
                segrefs = segrefs,
@@ -330,8 +360,8 @@ def dis_sib(base, name, pr = False):
                segunit = segunit,
                prevsp  = prevsp)
 
-def dis_inst(segnum, segbase, segname, procname, byte_offset, pr = False):
-    ibytes = [get_byte_offset(segbase, segname, byte_offset, procname, False)]
+def dis_inst(segnum, segbase, segname, procname, byte_offset, file = None):
+    ibytes = [get_byte_offset(segbase, segname, byte_offset, procname, None)]
 
     inst = list(optab.get(ibytes[0], ('undefined')))
     mnem = inst[0]
@@ -350,29 +380,29 @@ def dis_inst(segnum, segbase, segname, procname, byte_offset, pr = False):
         if inst[i] in flags:
             flags[inst[i]] = True
         elif inst[i] == 'b':
-            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, file = None))
             parm = ibytes[len(ibytes)-1]
             parm_size = 8
             if (parm >= 128):
-                ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+                ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, file = None))
                 parm = ((parm - 128) << 8) + ibytes[len(ibytes)-1]
                 parm_size = 16
             have_parm = True
         elif inst[i] == 'w':
-            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
-            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, file = None))
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, file = None))
             parm = (ibytes[len(ibytes)-1] << 8) + ibytes[len(ibytes)-2]
             if (parm >= 32768):
                 parm -= 65536
             parm_size = 16
             have_parm = True
         elif inst[i] == 'ub' or inst[i] == 'db':
-            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, file = None))
             parm = ibytes[len(ibytes)-1]
             parm_size = 8
             have_parm = True
         elif inst[i] == 'sb':
-            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, file = None))
             parm = ibytes[len(ibytes)-1]
             if parm >= 128:
                 parm -= 256
@@ -386,78 +416,133 @@ def dis_inst(segnum, segbase, segname, procname, byte_offset, pr = False):
             raise Exception("invalid entry in opcode table: " + str(inst[i]))
         if have_parm:
             # XXX here is where we should handle flags
-            s = s + ' %d' % parm
+            if flags['segment']:
+                s = s + ' seg%d' % parm
+            elif flags['code']:
+                t = byte_offset + len(ibytes) + parm
+                s = s + ' %s+%04x' % (segname, t)
+            elif flags['intermediate']:
+                s = s + ' intermediate %d' % parm
+            elif flags['proc']:
+                if flags['global']:
+                    s = s + ' global proc%d' % parm
+                elif flags['local']:
+                    s = s + ' lproc%d' % parm
+                else:
+                    s = s + ' proc%d' % parm
+            elif flags['global']:
+                s = s + ' global_%d' % parm
+            elif flags['local']:
+                s = s + ' local_%d' % parm
+            else:
+                s = s + ' %d' % parm
             have_parm = 0
+            for k in flags:
+                flags[k] = False
 
-    if pr:
+    if file is not None:
         print("%s:" % get_byte_offset_addr_str(segbase, segname, byte_offset, procname),
-              end = '')
+              end = '', file = file)
         for i in range(4):
             if i < len(ibytes):
-                print(" %02x" % ibytes[i], end = '')
+                print(" %02x" % ibytes[i], end = '', file = file)
             else:
-                print("   ", end = '')
-        print(" %s" % s)
+                print("   ", end = '', file = file)
+        print(" %s" % s, file = file)
 
     return len(ibytes)
 
-def dis_proc(segnum, segbase, segname, procname, proc_offset, pr = False):
-    end_offset = get_word(segbase + proc_offset - 1, procname + '.endoffset', pr)
-    local_size = get_word(segbase + proc_offset + 0, procname + '.localsize', pr)
+def dis_proc(segnum, segbase, segname, procname, proc_offset, file = None):
+    end_offset = get_word(segbase + proc_offset - 1, procname + '.endoffset', file)
+    local_size = get_word(segbase + proc_offset + 0, procname + '.localsize', file)
     byte_offset = proc_offset * 2 + 2
     while byte_offset <= end_offset:
         byte_offset += dis_inst(segnum, segbase, segname,
-                                procname, byte_offset, pr)
+                                procname, byte_offset, file = file)
+    if file is not None and byte_offset & 1:
+        get_byte_offset(segbase, segname, byte_offset, procname, file = file)
 
-def dis_seg(segnum, segbase, seglength, segname, pr = False):
-    proc_dir_offset = get_word(segbase, segname + '.procdir', pr)
-    if pr:
-        print()
+def dis_seg(segnum, segbase, seglength, segname, file = None):
+    if memusage[segbase] is None:
+        memusage[segbase] = ['segment', seglength, segnum, segname]
+    else:
+        assert memusage[segbase][0] == 'segment'
+    
+    proc_dir_offset = get_word(segbase, segname + '.procdir', file = file)
+    if file is not None:
+        print(file = file)
 
     if proc_dir_offset != seglength - 1:
-        print('segment length %04x, proc dir offset %04x' % (seglength, proc_dir_offset))
+        print('segment length %04x, proc dir offset %04x' % (seglength, proc_dir_offset), file = file)
     proc_dir = segbase + proc_dir_offset
-    seg_num = get_byte(proc_dir + 0, segname + '.segnum', False, False)
-    num_proc = get_byte(proc_dir + 0, segname + '.numproc', True, False)
+    seg_num = get_byte(proc_dir + 0, segname + '.segnum', False, file = file)
+    num_proc = get_byte(proc_dir + 0, segname + '.numproc', True, file = file)
     proc_offset = [0] * (num_proc + 1)
     for i in range(num_proc, 0, -1):
-        proc_offset[i] = get_word(proc_dir - i, segname + '.proc%d_offset' % i, False)
+        proc_offset[i] = get_word(proc_dir - i, segname + '.proc%d_offset' % i, file = file)
 
+    proc_by_offset = {}
     for i in range(1, num_proc + 1):
-        dis_proc(segnum, segbase, segname, 'proc%d' % i, proc_offset[i], pr)
-        if (pr):
-            print()
+        proc_by_offset[proc_offset[i]] = i
+
+    for po in sorted(proc_by_offset.keys()):
+        p = proc_by_offset[po]
+        dis_proc(segnum, segbase, segname, 'proc%d' % p, po, file)
+        if file is not None:
+            print(file = file)
 
     for i in range(num_proc, 0, -1):
-        get_word(proc_dir - i, segname + '.proc%d_offset' % i, pr)
-    get_byte(proc_dir + 0, segname + '.segnum', False, pr)
-    get_byte(proc_dir + 0, segname + '.numproc', True, pr)
-    if pr:
-        print()
+        get_word(proc_dir - i, segname + '.proc%d_offset' % i, file)
+    get_byte(proc_dir + 0, segname + '.segnum', False, file)
+    get_byte(proc_dir + 0, segname + '.numproc', True, file)
+    if file is not None:
+        print(file = file)
 
-def dis_rom():
-#    for i in range(image_len):
-#        print("%04x: %04x" % (image_addr + i, mem[image_addr + i]))
-    boot_param_addr = get_word(image_addr, 'boot', pr = True)
-    print()
+def pass1_rom():
+    boot_param_addr = dis_boot_param_pointer(image_addr, 'boot', file = None)
 
-    boot_params = get_boot_params(boot_param_addr, 'boot', pr = True)
-    print()
+    boot_params = dis_boot_params(boot_param_addr, 'boot', file = None)
 
-    tib = get_tib(boot_params.ctp, 'tib', pr = True)
-    print()
+    tib = dis_tib(boot_params.ctp, 'tib', file = None)
 
     # XXX should determine segment count automatically, rather than
     # assume 2.
-    sys_seg = get_sibsvec(boot_params.sdp, 2, 'sdp', pr = True)
-    print()
+    sys_seg = dis_sibsvec(boot_params.sdp, 2, 'sdp', file = None)
 
     for i in range(len(sys_seg)):
         if sys_seg[i] != 0 and sys_seg[i] != nil:
-            sib = dis_sib(sys_seg[i], 'sib%d' % i, True)
-            print()
-            dis_seg(i, sib.segbase, sib.segleng, 'seg%d' % i, True)
-            print()
+            sib = dis_sib(sys_seg[i], 'sib%d' % i, file = None)
+            dis_seg(i, sib.segbase, sib.segleng, 'seg%d' % i, file = None)
+
+
+def pass2_rom(file, base, length):
+    addr = base
+    while addr < base + length:
+        usage = memusage[addr]
+        if usage is None:
+            get_word(addr, '', file = file)
+            usage = (None, 1)
+        elif usage[0] == 'boot_param_pointer':
+            dis_boot_param_pointer(addr, 'boot', file = file)
+        elif usage[0] == 'boot_params':
+            dis_boot_params(addr, 'boot', file = file)
+        elif usage[0] == 'tib':
+            dis_tib(addr, 'tib', file = file)
+        elif usage[0] == 'sibsvec':
+            dis_sibsvec(addr, 2, 'sdp', file = file)
+        elif usage[0] == 'sib':
+            dis_sib(addr, 'sib', file = file)
+        elif usage[0] == 'segment':
+            dis_seg(segnum    = usage[2],
+                    segbase   = addr,
+                    seglength = usage[1],
+                    segname   = usage[3],
+                    file = file)
+        else:
+            raise Exception("invalid memory usage entry " + str(usage))
+        print(file = file)
+        addr += usage[1]
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -468,4 +553,8 @@ if __name__ == '__main__':
     read_rom(args.objectfile)
     args.objectfile.close()
 
-    dis_rom()
+    pass1_rom()
+
+    if args.disfile is not None:
+        pass2_rom(args.disfile, 0xf400, 0x200)
+
