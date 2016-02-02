@@ -117,12 +117,12 @@ optab     = { 0x00: ('sldc', 'literal', 0x00),
               0x8e: ('stm',  'literal', 'ub'),
               0x8f: ('modi',),
 
-              0x90: ('cpl',  'proclocal', 'ub'),
-              0x91: ('cpg',  'procglobal', 'ub'),
-              0x92: ('cpi',  'procintermediate', 'db', 'ub'),
-              0x93: ('cxl',  'segproclocal', 'ub', 'ub'),
-              0x94: ('cxg',  'segprocglobal', 'ub', 'ub'),
-              0x95: ('cxi',  'secprocintermediate', 'ub', 'db', 'ub'),
+              0x90: ('cpl',  'proc', 'local', 'ub'),
+              0x91: ('cpg',  'proc', 'global', 'ub'),
+              0x92: ('cpi',  'proc', 'intermediate', 'db', 'ub'),
+              0x93: ('cxl',  'segment', 'proc', 'local', 'ub', 'ub'),
+              0x94: ('cxg',  'segment', 'proc', 'global', 'ub', 'ub'),
+              0x95: ('cxi',  'secment', 'proc', 'intermediate', 'ub', 'db', 'ub'),
               0x96: ('rpu',  'literal', 'b'),
               0x97: ('cpf',),
               0x98: ('ldcn',),
@@ -188,7 +188,7 @@ optab     = { 0x00: ('sldc', 'literal', 0x00),
               0xd8: ('ixp', 'literal', 'ub', 'literal', 'ub'),
               0xd9: ('ste', 'segment', 'ub', 'literal', 'b'),
               0xda: ('inn',),
-              0xdb: ('int',),
+              0xdb: ('uni',),
               0xdc: ('int',),
               0xdd: ('dif',),
               0xde: ('signal',),
@@ -230,6 +230,13 @@ def get_byte(addr, name, high, pr = False):
         print("%04x%s: %02x    %s" % (addr, "LH"[int(high)], b, name))
     return b
 
+def get_byte_offset_addr_str(segbase, segname, byte_offset, procname):
+    addr = segbase + (byte_offset >> 1)
+    high = (byte_offset & 1) != 0
+    return "%04x%s %s+%04x %s" % (addr, "LH"[int(high)],
+                                   segname, byte_offset,
+                                   procname)
+
 def get_byte_offset(segbase, segname, byte_offset, procname, pr = False):
     addr = segbase + (byte_offset >> 1)
     high = (byte_offset & 1) != 0
@@ -239,10 +246,9 @@ def get_byte_offset(segbase, segname, byte_offset, procname, pr = False):
     else:
         b = w & 0xff
     if pr:
-        print("%04x%s %s+%04x %s: %02x" % (addr, "LH"[int(high)],
-                                           segname, byte_offset,
-                                           procname,
-                                           b))
+        print("%s: %02x" % (get_byte_offset_addr_str(segbase, segname,
+                                                     byte_offset, procname),
+                            b))
     return b
 
 
@@ -325,8 +331,75 @@ def dis_sib(base, name, pr = False):
                prevsp  = prevsp)
 
 def dis_inst(segnum, segbase, segname, procname, byte_offset, pr = False):
-    opcode = get_byte_offset(segbase, segname, byte_offset, procname, True)
-    return 1 # XXX need to return real length of instruction
+    ibytes = [get_byte_offset(segbase, segname, byte_offset, procname, False)]
+
+    inst = list(optab.get(ibytes[0], ('undefined')))
+    mnem = inst[0]
+    s = "%-8s" % mnem
+    flags = { 'literal':      False,
+              'local':        False,
+              'global':       False,
+              'intermediate': False,
+              'const':        False,
+              'relative':     False,
+              'proc':         False,
+              'segment':      False,
+              'code':         False }
+    have_parm = False
+    for i in range(1, len(inst)):
+        if inst[i] in flags:
+            flags[inst[i]] = True
+        elif inst[i] == 'b':
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+            parm = ibytes[len(ibytes)-1]
+            parm_size = 8
+            if (parm >= 128):
+                ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+                parm = ((parm - 128) << 8) + ibytes[len(ibytes)-1]
+                parm_size = 16
+            have_parm = True
+        elif inst[i] == 'w':
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+            parm = (ibytes[len(ibytes)-1] << 8) + ibytes[len(ibytes)-2]
+            if (parm >= 32768):
+                parm -= 65536
+            parm_size = 16
+            have_parm = True
+        elif inst[i] == 'ub' or inst[i] == 'db':
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+            parm = ibytes[len(ibytes)-1]
+            parm_size = 8
+            have_parm = True
+        elif inst[i] == 'sb':
+            ibytes.append(get_byte_offset(segbase, segname, byte_offset + len(ibytes), procname, False))
+            parm = ibytes[len(ibytes)-1]
+            if parm >= 128:
+                parm -= 256
+            parm_size = 8
+            have_parm = True
+        elif type(inst[i]) == int:
+            parm = inst[i]
+            parm_size = 8
+            have_parm = True
+        else:
+            raise Exception("invalid entry in opcode table: " + str(inst[i]))
+        if have_parm:
+            # XXX here is where we should handle flags
+            s = s + ' %d' % parm
+            have_parm = 0
+
+    if pr:
+        print("%s:" % get_byte_offset_addr_str(segbase, segname, byte_offset, procname),
+              end = '')
+        for i in range(4):
+            if i < len(ibytes):
+                print(" %02x" % ibytes[i], end = '')
+            else:
+                print("   ", end = '')
+        print(" %s" % s)
+
+    return len(ibytes)
 
 def dis_proc(segnum, segbase, segname, procname, proc_offset, pr = False):
     end_offset = get_word(segbase + proc_offset - 1, procname + '.endoffset', pr)
