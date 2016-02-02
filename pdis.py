@@ -529,7 +529,7 @@ def dis_proc(seg_num, seg_base, seg_name, proc_name, proc_offset, file = None):
     if file is not None and byte_offset & 1:
         get_byte_offset(seg_base, seg_name, byte_offset, proc_name, file = file)
         byte_offset += 1
-    return (byte_offset // 2) - proc_offset
+    return (byte_offset // 2) - (proc_offset - 1)
 
 def dis_seg_nonproc(seg_num, seg_base, seg_name, word_offset, file = None):
     usage = memusage[seg_base + word_offset]
