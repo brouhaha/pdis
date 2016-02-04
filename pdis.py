@@ -23,15 +23,15 @@ import sys
 
 nil = 0xfc00
 
-image_addr = 0
+image_base = 0
 image_len = 0
 mem = None
 memusage = None
 labels = None
 
 def mem_init():
-    global image_addr, image_len, mem, memusage, labels
-    image_addr = 0
+    global image_base, image_len, mem, memusage, labels
+    image_base = 0
     image_len = 0
     mem = [0] * 65536
     memusage = [None] * 65536
@@ -221,22 +221,22 @@ optab     = { 0x00: ('sldc', 'literal', 0x00),
               }
     
 def read_words(f, count):
-    global image_addr, image_len, mem
-    image_addr = 0
+    global image_base, image_len, mem
+    image_base = 0
     image_len = 0
     while count:
         bytes = f.read(2)
-        mem[image_addr + image_len] = (bytes[1] << 8) + bytes[0]
+        mem[image_base + image_len] = (bytes[1] << 8) + bytes[0]
         image_len += 1
         count -= 1
     
-def read_rom(f):
-    global image_addr, image_len, mem
-    image_addr = 0xf400
+def read_image(f, base):
+    global image_base, image_len, mem
+    image_base = base
     image_len = 0
     bytes = f.read(2)
     while bytes:
-        mem[image_addr + image_len] = (bytes[1] << 8) + bytes[0]
+        mem[image_base + image_len] = (bytes[1] << 8) + bytes[0]
         image_len += 1
         bytes = f.read(2)
 
@@ -366,18 +366,27 @@ SIB = collections.namedtuple('SIB', ['segbase',
                                      'segunit',
                                      'prevsp'])
 
-def dis_sib(addr, name, file = None):
+# AOS track 0 bootstrap seems to only use a three-word SIB entry
+def dis_sib(addr, name, short = False, file = None):
     if memusage[addr] is None:
-        memusage[addr] = ['sib', 6]
+        memusage[addr] = ['sib', 3 if short else 6]
     else:
         assert memusage[addr][0] == 'sib'
+        short = memusage[addr][1] == 3
     
     segbase = get_word(addr + 0, name + '.segbase', file)
     segleng = get_word(addr + 1, name + '.segleng', file)
-    segrefs = get_word(addr + 2, name + '.segrefs', file)
-    segaddr = get_word(addr + 3, name + '.segaddr', file)
-    segunit = get_word(addr + 4, name + '.segunit', file)
-    prevsp  = get_word(addr + 5, name + '.prevsp',  file)
+    if not short:
+        segrefs = get_word(addr + 2, name + '.segrefs', file)
+        segaddr = get_word(addr + 3, name + '.segaddr', file)
+        segunit = get_word(addr + 4, name + '.segunit', file)
+        prevsp  = get_word(addr + 5, name + '.prevsp',  file)
+    else:
+        unknown = get_word(addr + 2, name + '.segunk', file)
+        segrefs = None
+        segaddr = None
+        segunit = None
+        prevsp  = None
     return SIB(segbase = segbase,
                segleng = segleng,
                segrefs = segrefs,
@@ -584,12 +593,16 @@ def dis_seg(seg_num, seg_base, seg_length, seg_name, file = None):
         get_byte(proc_dir + 0, seg_name + '.numproc', True, file = file)
         print(file = file)
 
-def pass1_rom():
-    boot_param_addr = dis_boot_param_pointer(image_addr, 'boot', file = None)
+def pass_1_boot(rom = False):
+    if rom:
+        boot_param_addr = dis_boot_param_pointer(image_base, 'boot', file = None)
+    else:
+        boot_param_addr = 0
 
     boot_params = dis_boot_params(boot_param_addr, 'boot', file = None)
+    ctp_addr = boot_params.ctp
 
-    tib = dis_tib(boot_params.ctp, 'tib', file = None)
+    tib = dis_tib(ctp_addr, 'tib', file = None)
 
     # XXX should determine segment count automatically, rather than
     # assume 2.
@@ -600,9 +613,34 @@ def pass1_rom():
             sib = dis_sib(sys_seg[i], 'sib%d' % i, file = None)
             dis_seg(i, sib.segbase, sib.segleng, 'seg%d' % i, file = None)
 
-def pass2(file, base, length):
-    addr = base
-    while addr < base + length:
+def pass_1_trk0():
+    ctp_addr = 0x2000
+
+    tib = dis_tib(ctp_addr, 'tib', file = None)
+
+    if tib.sibsvec == nil:
+        seg_num = 1
+        seg_base = ctp_addr + 12 # sizeof(tib)
+        seg_length = mem[seg_base] + 1
+        dis_seg(seg_num    = seg_num,
+                seg_base   = seg_base,
+                seg_length = seg_length,
+                seg_name   = 'seg%d' % seg_num,
+                file = None)
+
+    else:
+        user_seg = dis_sibsvec(tib.sibsvec, 3, 'sibsvec', file = None)
+        for i in range(len(user_seg)):
+            if user_seg[i] != 0 and user_seg[i] != nil:
+                seg_num = i + 128
+                sib = dis_sib(user_seg[i], 'sib%d' % seg_num, short = True, file = None)
+                dis_seg(i + 128, sib.segbase, sib.segleng, 'seg%d' % seg_num, file = None)
+        
+
+def pass_2(file):
+    global image_base, image_len
+    addr = image_base
+    while addr < image_base + image_len:
         usage = memusage[addr]
         if usage is None:
             get_word(addr, '', file = file)
@@ -650,97 +688,151 @@ SegInfo = collections.namedtuple('SegInfo', ['block',
                                              'segnum',
                                              'codeversion'])
 
-def get_code_seginfo(header, seg_num):
-    block = get16(header, seg_num * 4)
-    length = get16(header, seg_num * 4 + 2)
-    name = getalpha(header, 0x040 + seg_num * 8)
-    kind = get16(header, 0x0c0 + seg_num * 2)
-    addr = get16(header, 0x0e0 + seg_num * 2)
-    segnum = get8(header, 0x100 + seg_num * 2)
-    codeversion = get8(header, 0x100 + seg_num * 2 + 1)
+def get_code_seg_info(seg_page, rel_seg_num):
+    block = get16(seg_page, rel_seg_num * 4)
+    length = get16(seg_page, rel_seg_num * 4 + 2)
+    name = getalpha(seg_page, 0x040 + rel_seg_num * 8)
+    kind = get16(seg_page, 0x0c0 + rel_seg_num * 2)
+    addr = get16(seg_page, 0x0e0 + rel_seg_num * 2)
+    segnum = get8(seg_page, 0x100 + rel_seg_num * 2)
+    codeversion = get8(seg_page, 0x100 + rel_seg_num * 2 + 1)
     return SegInfo(block  = block,
                    length = length,
                    name   = name,
                    kind   = kind,
                    addr   = addr,
-                   segnum = seg_num,
+                   segnum = rel_seg_num,
                    codeversion = codeversion)
     
+BlockInfo = collections.namedtuple('BlockInfo', ['block',
+                                                 'block_count',
+                                                 'kind',
+                                                 'what', # 'code', 'interface'
+                                                 'seg_info'])
 
 def dis_codefile(cf, df):
     verbose = False
     header = cf.read(512)
-    seginfo = [get_code_seginfo(header, i) for i in range(16)]
-    seg_by_block = {}
-    for i in range(16):
-        if seginfo[i].block != 0:
-            seg_by_block[seginfo[i].block] = seginfo[i]
-    if verbose:
-        print('       blk  leng name     kind addr seg# cver')
-    for i in range(16):
-        s = seginfo [i]
-        if s.block != 0:
-            assert i == s.segnum
-        if verbose:
-            print('seg%02d: %04x %04x %s %04x %04x %04x %04x' % (i,
-                                                                 s.block,
-                                                                 s.length,
-                                                                 s.name,
-                                                                 s.kind,
-                                                                 s.addr,
-                                                                 s.segnum,
-                                                                 s.codeversion),
-              file = df)
-    if verbose:
-        print(file = df)
+    seg_info = [get_code_seg_info(header, i) for i in range(16)]
 
-    if verbose:
-        print('       blk  leng name     kind addr cver')
-    for block in sorted(seg_by_block.keys()):
-        s = seg_by_block[block]
-        assert block == s.block
-        if verbose:
-            print('seg%02d: %04x %04x %s %04x %04x %04x' % (s.segnum,
-                                                            s.block,
-                                                            s.length,
-                                                            s.name,
-                                                            s.kind,
-                                                            s.addr,
-                                                            s.codeversion),
-              file = df)
+    # XXX Support for vectored code files (which can have segments 0..15 for
+    # system, or 128..143 for user, has not been tested.
+    code_kind = ['static', 'vectored'][header[0x16f]]
+    if code_kind == 'vectored':
+        last_seg = get16(header, 0x170)
+        last_code_block = get16(header, 0x172)
+        orig_f_pos = cf.tell()
+        cf.seek((last_code_block + 1) * 512)
+        for i in range(16, lastseg, 16):
+            seg_page = cf.read(512)
+            seg_info.append([get_code_seg_info(header, i) for i in range(16)])
+        cf.seek(orig_f_pos)
+
+    block_info = {}
+
+    for i in range(len(seg_info)):
+        si = seg_info[i]
+        if si.block != 0:
+            if si.kind < 5:
+                kind = ['linked', 'hostseg', 'segproc', 'unitseg', 'seprtseg'][si.kind]
+            else:
+                kind = str(si.kind)
+            assert si.block not in block_info
+            block_info[si.block] = BlockInfo(block = si.block,
+                                             block_count = (si.length + 255) // 256,
+
+                                             kind = kind,
+                                             what = 'code',
+                                             seg_info = si)
+            if kind == 'unitseg':
+                assert si.addr != 0
+                assert si.addr not in block_info
+                block_info[si.addr] = BlockInfo(block = si.addr,
+                                                block_count = si.block - si.addr,
+                                                kind = kind,
+                                                what = 'interface',
+                                                seg_info = si)
+
+    print_seg_list = True
+    if print_seg_list:
+        print('       blk  leng name     kind     addr cver')
+    sk = sorted(block_info.keys())
+    for i in range(len(sk)):
+        block = sk[i]
+        bi = block_info[block]
+        si = bi.seg_info
+        if bi.what == 'interface':
+            if print_seg_list:
+                print('interface')
+        elif bi.what == 'code':
+            if print_seg_list:
+                print('seg%02d: %04x %04x %s %-8s %04x %04x' % (si.segnum,
+                                                                si.block,
+                                                                si.length,
+                                                                si.name,
+                                                                bi.kind,
+                                                                si.addr,
+                                                                si.codeversion),
+                      file = df)
     if verbose:
         print(file = df)
 
     expected_block = 1
-    for block in sorted(seg_by_block.keys()):
-        s = seg_by_block[block]
-        assert block == expected_block
-        block_count = (s.length + 255) // 256
-        #print(s.segnum, block, block_count)
-        expected_block += block_count
-        mem_init()
-        read_words(args.objectfile, block_count * 256)
-        name = s.name
-        if name == '        ':
-            name = 'seg%d' % s.segnum
-        dis_seg(s.segnum, 0, s.length, name, None)
-        pass2(df, 0, s.length)
+    for i in range(len(sk)):
+        block = sk[i]
+        bi = block_info[block]
+        si = bi.seg_info
+        assert block >= expected_block
+        if block > expected_block:
+            count = block - expected_block
+            print("skipping %d blocks of unknown content" % count)
+            args.objectfile.read(512 * count)
+            expected_block += count
+            assert block == expected_block
+        if bi.what == 'interface':
+            print('%d blocks of interface text' % bi.block_count)
+            args.objectfile.read(512 * bi.block_count)
+        elif bi.what == 'code':
+            seg_name = si.name
+            if seg_name == '        ':
+                seg_name = 'seg%d' % si.segnum
+            mem_init()
+            print("reading segment %s, file pos %04x" % (seg_name, args.objectfile.tell()))
+            read_words(args.objectfile, bi.block_count * 256)
+            dis_seg(si.segnum, 0, si.length, seg_name, None)
+            pass_2(df)
+        else:
+            assert False
+
+        expected_block += bi.block_count
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('objectfile', type=argparse.FileType('rb'))
     parser.add_argument('disfile', type=argparse.FileType('w'), nargs='?', default = sys.stdout)
-    parser.add_argument('--rom', action='store_true', help='disassemble boot ROM')
+    input_file_type_group = parser.add_mutually_exclusive_group()
+    input_file_type_group.add_argument('--boot', action='store_true', help='disassemble floppy bootstrap')
+    input_file_type_group.add_argument('--trk0', action='store_true', help='disassemble track 0 floppy bootstrap')
+    input_file_type_group.add_argument('--rom', action='store_true', help='disassemble boot ROM')
     args = parser.parse_args()
 
-    if args.rom:
+    if args.boot or args.rom or args.trk0:
         mem_init()
-        read_rom(args.objectfile)
+        if args.boot:
+            base = 0x0000
+        elif args.trk0:
+            base = 0x2000
+        elif args.rom:
+            base = 0xf400
+        read_image(args.objectfile, base)
         args.objectfile.close()
-        pass1_rom()
+        if args.trk0:
+            pass_1_trk0()
+        else:
+            pass_1_boot(rom = args.rom)
         if args.disfile is not None:
-            pass2(args.disfile, 0xf400, 0x200)
+            pass_2(args.disfile)
             args.disfile.close()
     else:
         dis_codefile(args.objectfile, args.disfile)
