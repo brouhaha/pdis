@@ -21,7 +21,7 @@ import collections
 import itertools
 import sys
 
-#from pyImageDisk import filesystem
+#from pyImageDisk import disk, filesystem
 
 nil = 0xfc00
 
@@ -355,6 +355,7 @@ def dis_sibsvec(addr, count, name, file = None):
         memusage[addr] = ['sibsvec', count]
     else:
         assert memusage[addr][0] == 'sibsvec'
+        count = memusage[addr][1]
     
     sibsvec = [0] * count
     for i in range(count):
@@ -596,61 +597,46 @@ def dis_seg(seg_num, seg_base, seg_length, seg_name, file = None):
         get_byte(proc_dir + 0, seg_name + '.numproc', True, file = file)
         print(file = file)
 
-def pass_1_boot(rom = False, trk1 = False):
-    if rom:
-        boot_param_addr = dis_boot_param_pointer(image_base, 'boot', file = None)
-    else:
-        boot_param_addr = 0
+def pass_1_rom(seg_count):
+    boot_param_addr = dis_boot_param_pointer(image_base, 'boot', file = None)
 
     boot_params = dis_boot_params(boot_param_addr, 'boot', file = None)
     ctp_addr = boot_params.ctp
 
     tib = dis_tib(ctp_addr, 'tib', file = None)
 
-    # XXX should determine segment count automatically, rather than
-    # assume 2.
-    sys_seg = dis_sibsvec(boot_params.sdp, 2, 'sdp', file = None)
+    sys_seg = dis_sibsvec(boot_params.sdp, seg_count, 'sdp', file = None)
 
     for i in range(len(sys_seg)):
         if sys_seg[i] != 0 and sys_seg[i] != nil:
             sib = dis_sib(sys_seg[i], 'sib%d' % i, file = None)
-            if not trk1:
+            if sib.segbase != 0 and sib.segbase != nil:
                 dis_seg(i, sib.segbase, sib.segleng, 'seg%d' % i, file = None)
-    if trk1:
-        # H0 track 1 boot isn't a proper segment.
-        seg_base = tib.segb
-        end_offset = 1024 - 2 * seg_base
-        memusage[seg_base + (tib.ipc // 2)] = ['bootproc', seg_base, tib.ipc, end_offset]
-        dis_proc(seg_num     = 1,
-                 seg_base    = seg_base,
-                 seg_name    = 'seg1',
-                 proc_name   = 'proc1',
-                 proc_offset = tib.ipc,
-                 end_offset  = end_offset,
-                 file        = None)
-
         
+def pass_1_wdboot(seg_count):
+    boot_param_addr = 0
 
-def pass_1_floppy_track(ctp_addr):
+    boot_params = dis_boot_params(boot_param_addr, 'boot', file = None)
+    ctp_addr = boot_params.ctp
+
     tib = dis_tib(ctp_addr, 'tib', file = None)
 
-    if tib.sibsvec == nil:
-        seg_num = 1
-        seg_base = ctp_addr + 12 # sizeof(tib)
-        seg_length = mem[seg_base] + 1
-        dis_seg(seg_num    = seg_num,
-                seg_base   = seg_base,
-                seg_length = seg_length,
-                seg_name   = 'seg%d' % seg_num,
-                file = None)
+    sys_seg = dis_sibsvec(boot_params.sdp, seg_count, 'sdp', file = None)
 
-    else:
-        user_seg = dis_sibsvec(tib.sibsvec, 3, 'sibsvec', file = None)
-        for i in range(len(user_seg)):
-            if user_seg[i] != 0 and user_seg[i] != nil:
-                seg_num = i + 128
-                sib = dis_sib(user_seg[i], 'sib%d' % seg_num, short = True, file = None)
-                dis_seg(i + 128, sib.segbase, sib.segleng, 'seg%d' % seg_num, file = None)
+    for i in range(len(sys_seg)):
+        if sys_seg[i] != 0 and sys_seg[i] != nil:
+            sib = dis_sib(sys_seg[i], 'sib%d' % i, file = None)
+            if sib.segbase != 0 and sib.segbase != nil:
+                dis_seg(i, sib.segbase, sib.segleng, 'seg%d' % i, file = None)
+        
+def pass_1_acdboot(seg_count):
+    ctp_addr = 0x2000
+    seg_base = 0x200c
+    seg_length = mem[seg_base] + 1
+
+    tib = dis_tib(ctp_addr, 'tib', file = None)
+
+    dis_seg(1, seg_base, seg_length, 'boot', file = None)
         
 
 def pass_2(file):
@@ -677,14 +663,6 @@ def pass_2(file):
                     seg_length = usage[1],
                     seg_name   = usage[3],
                     file = file)
-        elif usage[0] == 'bootproc':
-            dis_proc(seg_num     = 1,
-                     seg_base    = usage[1],
-                     seg_name    = 'seg1',
-                     proc_name   = 'proc1',
-                     proc_offset = usage[2],
-                     end_offset  = usage[3],
-                     file = file)
         else:
             raise Exception("invalid memory usage entry " + str(usage))
         print(file = file)
@@ -818,19 +796,19 @@ def dis_ucsd_codefile(cf, header, df):
         if block > expected_block:
             count = block - expected_block
             print("skipping %d blocks of unknown content" % count)
-            args.objectfile.read(512 * count)
+            cf.read(512 * count)
             expected_block += count
             assert block == expected_block
         if bi.what == 'interface':
             print('%d blocks of interface text' % bi.block_count)
-            args.objectfile.read(512 * bi.block_count)
+            cf.read(512 * bi.block_count)
         elif bi.what == 'code':
             seg_name = si.name.strip()
             if seg_name == '':
                 seg_name = 'seg%d' % si.segnum
             mem_init()
-            print("reading segment %s, file pos %04x" % (seg_name, args.objectfile.tell()))
-            read_words(args.objectfile, bi.block_count * 256)
+            print("reading segment %s, file pos %04x" % (seg_name, cf.tell()))
+            read_words(cf, bi.block_count * 256)
             dis_seg(si.segnum, 0, si.length, seg_name, None)
             pass_2(df)
         else:
@@ -851,12 +829,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     input_file_type_group = parser.add_mutually_exclusive_group()
-    input_file_type_group.add_argument('--boot', action='store_true', help='disassemble floppy bootstrap')
-    input_file_type_group.add_argument('--trk0', action='store_true', help='disassemble track 0 floppy bootstrap (loaded by ACD PDQ-3 boot ROM)')
-    input_file_type_group.add_argument('--trk1', action='store_true', help='disassemble track 1 floppy bootstrap (loaded by WD9000 microcode)')
+    input_file_type_group.add_argument('--acdboot', action='store_true', help='disassemble track 0 floppy bootstrap (loaded by ACD PDQ-3 boot ROM)')
+    input_file_type_group.add_argument('--wdboot', action='store_true', help='disassemble track 0 and 1 floppy bootstrap (track 1 loaded by WD9000 microcode)')
     input_file_type_group.add_argument('--rom',  action='store_true', help='disassemble boot ROM')
 
-    parser.add_argument('--imd', nargs='?', type=argparse.FileType('rb'), help='get object file input from an ImageDisk image')
+#    parser.add_argument('--imd', nargs='?', type=argparse.FileType('rb'), help='get object file input from an ImageDisk image')
+    parser.add_argument('--imd', nargs='?', help='get object file input from an ImageDisk image')
 
     parser.add_argument('objectfile', help = 'object file for input')
 
@@ -864,25 +842,34 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    print(args)
+    
     if args.imd is not None:
-        raise NotImplementedError('This is a stub for future development.')
+        #raise NotImplementedError('This is a stub for future development.')
+        imd = disk.disk(filename = args.imd)
     else:
         objectfile = open(args.objectfile, 'rb')
 
-    if args.boot or args.rom or args.trk0 or args.trk1:
+    if args.rom or args.wdboot or args.acdboot:
         mem_init()
-        if args.boot or args.trk1:
-            base = 0x0000
-        elif args.trk0:
-            base = 0x2000
-        elif args.rom:
+
+        if args.rom:
             base = 0xf400
-        read_image(objectfile, base)
-        objectfile.close()
-        if args.trk0:
-            pass_1_floppy_track(base)
-        else:
-            pass_1_boot(rom = args.rom, trk1 = args.trk1)
+            read_image(objectfile, base)
+            objectfile.close()
+            pass_1_rom(seg_count = 2)
+        elif args.wdboot:
+            base = 0x0000
+            read_image(objectfile, base)
+            objectfile.close()
+            pass_1_wdboot(seg_count = 16)
+        elif args.acdboot:
+            base = 0x2000
+            read_image(objectfile, base)
+            print("image_base %04x, image_len %04x" % (image_base, image_len))
+            objectfile.close()
+            pass_1_acdboot(seg_count = 2)
+
         if args.disfile is not None:
             pass_2(args.disfile)
             args.disfile.close()
