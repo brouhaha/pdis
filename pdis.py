@@ -427,7 +427,7 @@ def dis_inst(seg_num, seg_base, seg_name, proc_name, byte_offset, file = None):
     global next_label_num
     ibytes = [get_byte_offset(seg_base, seg_name, byte_offset, proc_name, None)]
 
-    inst = list(optab.get(ibytes[0], ('undefined')))
+    inst = list(optab.get(ibytes[0], ('undefined',)))
     mnem = inst[0]
     s = "%-8s" % mnem
     flags = { 'literal':      False,
@@ -496,7 +496,7 @@ def dis_inst(seg_num, seg_base, seg_name, proc_name, byte_offset, file = None):
                 if flags['global']:
                     s = s + ' global proc%d' % parm
                 elif flags['local']:
-                    s = s + ' lproc%d' % parm
+                    s = s + ' local proc%d' % parm
                 else:
                     s = s + ' proc%d' % parm
             elif flags['global']:
@@ -710,9 +710,17 @@ BlockInfo = collections.namedtuple('BlockInfo', ['block',
                                                  'what', # 'code', 'interface'
                                                  'seg_info'])
 
-def dis_codefile(cf, df):
+# AOS uses an entirely different code file header
+# first two bytes of first block are always 0xffff
+# next two bytes are block number of next index block, or 0x0000
+def dis_aos_codefile(cf, header, df):
+    pass  # XXX more code needed here (obviously)
+    
+
+# III.0 uses a code file header similar to II.0
+def dis_ucsd_codefile(cf, header, df):
     verbose = False
-    header = cf.read(512)
+    # traditional p-System code file header
     seg_info = [get_code_seg_info(header, i) for i in range(16)]
 
     # XXX Support for vectored code files (which can have segments 0..15 for
@@ -793,8 +801,8 @@ def dis_codefile(cf, df):
             print('%d blocks of interface text' % bi.block_count)
             args.objectfile.read(512 * bi.block_count)
         elif bi.what == 'code':
-            seg_name = si.name
-            if seg_name == '        ':
+            seg_name = si.name.strip()
+            if seg_name == '':
                 seg_name = 'seg%d' % si.segnum
             mem_init()
             print("reading segment %s, file pos %04x" % (seg_name, args.objectfile.tell()))
@@ -805,6 +813,14 @@ def dis_codefile(cf, df):
             assert False
 
         expected_block += bi.block_count
+
+
+def dis_codefile(cf, df):
+    header = cf.read(512)
+    if get16(header, 0) == 0xffff:
+        dis_aos_codefile(cf, header, df)
+    else:
+        dis_ucsd_codefile(cf, header, df)
 
 
 if __name__ == '__main__':
