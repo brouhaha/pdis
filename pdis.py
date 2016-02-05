@@ -21,6 +21,8 @@ import collections
 import itertools
 import sys
 
+#from pyImageDisk import filesystem
+
 nil = 0xfc00
 
 image_base = 0
@@ -526,10 +528,11 @@ def dis_inst(seg_num, seg_base, seg_name, proc_name, byte_offset, file = None):
 
     return len(ibytes)
 
-def dis_proc(seg_num, seg_base, seg_name, proc_name, proc_offset, file = None):
+def dis_proc(seg_num, seg_base, seg_name, proc_name, proc_offset, end_offset = None, file = None):
     global next_label_num
     next_label_num = 0
-    end_offset = get_word(seg_base + proc_offset - 1, proc_name + '.endoffset', file)
+    if end_offset is None:
+        end_offset = get_word(seg_base + proc_offset - 1, proc_name + '.endoffset', file)
     local_size = get_word(seg_base + proc_offset + 0, proc_name + '.localsize', file)
     byte_offset = proc_offset * 2 + 2
     while byte_offset <= end_offset:
@@ -593,7 +596,7 @@ def dis_seg(seg_num, seg_base, seg_length, seg_name, file = None):
         get_byte(proc_dir + 0, seg_name + '.numproc', True, file = file)
         print(file = file)
 
-def pass_1_boot(rom = False):
+def pass_1_boot(rom = False, trk1 = False):
     if rom:
         boot_param_addr = dis_boot_param_pointer(image_base, 'boot', file = None)
     else:
@@ -611,11 +614,24 @@ def pass_1_boot(rom = False):
     for i in range(len(sys_seg)):
         if sys_seg[i] != 0 and sys_seg[i] != nil:
             sib = dis_sib(sys_seg[i], 'sib%d' % i, file = None)
-            dis_seg(i, sib.segbase, sib.segleng, 'seg%d' % i, file = None)
+            if not trk1:
+                dis_seg(i, sib.segbase, sib.segleng, 'seg%d' % i, file = None)
+    if trk1:
+        # H0 track 1 boot isn't a proper segment.
+        seg_base = tib.segb
+        end_offset = 1024 - 2 * seg_base
+        memusage[seg_base + (tib.ipc // 2)] = ['bootproc', seg_base, tib.ipc, end_offset]
+        dis_proc(seg_num     = 1,
+                 seg_base    = seg_base,
+                 seg_name    = 'seg1',
+                 proc_name   = 'proc1',
+                 proc_offset = tib.ipc,
+                 end_offset  = end_offset,
+                 file        = None)
 
-def pass_1_trk0():
-    ctp_addr = 0x2000
+        
 
+def pass_1_floppy_track(ctp_addr):
     tib = dis_tib(ctp_addr, 'tib', file = None)
 
     if tib.sibsvec == nil:
@@ -661,6 +677,14 @@ def pass_2(file):
                     seg_length = usage[1],
                     seg_name   = usage[3],
                     file = file)
+        elif usage[0] == 'bootproc':
+            dis_proc(seg_num     = 1,
+                     seg_base    = usage[1],
+                     seg_name    = 'seg1',
+                     proc_name   = 'proc1',
+                     proc_offset = usage[2],
+                     end_offset  = usage[3],
+                     file = file)
         else:
             raise Exception("invalid memory usage entry " + str(usage))
         print(file = file)
@@ -825,32 +849,44 @@ def dis_codefile(cf, df):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('objectfile', type=argparse.FileType('rb'))
-    parser.add_argument('disfile', type=argparse.FileType('w'), nargs='?', default = sys.stdout)
+
     input_file_type_group = parser.add_mutually_exclusive_group()
     input_file_type_group.add_argument('--boot', action='store_true', help='disassemble floppy bootstrap')
-    input_file_type_group.add_argument('--trk0', action='store_true', help='disassemble track 0 floppy bootstrap')
-    input_file_type_group.add_argument('--rom', action='store_true', help='disassemble boot ROM')
+    input_file_type_group.add_argument('--trk0', action='store_true', help='disassemble track 0 floppy bootstrap (loaded by ACD PDQ-3 boot ROM)')
+    input_file_type_group.add_argument('--trk1', action='store_true', help='disassemble track 1 floppy bootstrap (loaded by WD9000 microcode)')
+    input_file_type_group.add_argument('--rom',  action='store_true', help='disassemble boot ROM')
+
+    parser.add_argument('--imd', nargs='?', type=argparse.FileType('rb'), help='get object file input from an ImageDisk image')
+
+    parser.add_argument('objectfile', help = 'object file for input')
+
+    parser.add_argument('disfile', type=argparse.FileType('w'), nargs='?', default = sys.stdout, help = 'disassembly output file')
+
     args = parser.parse_args()
 
-    if args.boot or args.rom or args.trk0:
+    if args.imd is not None:
+        raise NotImplementedError('This is a stub for future development.')
+    else:
+        objectfile = open(args.objectfile, 'rb')
+
+    if args.boot or args.rom or args.trk0 or args.trk1:
         mem_init()
-        if args.boot:
+        if args.boot or args.trk1:
             base = 0x0000
         elif args.trk0:
             base = 0x2000
         elif args.rom:
             base = 0xf400
-        read_image(args.objectfile, base)
-        args.objectfile.close()
+        read_image(objectfile, base)
+        objectfile.close()
         if args.trk0:
-            pass_1_trk0()
+            pass_1_floppy_track(base)
         else:
-            pass_1_boot(rom = args.rom)
+            pass_1_boot(rom = args.rom, trk1 = args.trk1)
         if args.disfile is not None:
             pass_2(args.disfile)
             args.disfile.close()
     else:
-        dis_codefile(args.objectfile, args.disfile)
-        args.objectfile.close()
+        dis_codefile(objectfile, args.disfile)
+        objectfile.close()
         args.disfile.close()
