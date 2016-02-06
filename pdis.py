@@ -490,8 +490,9 @@ def dis_inst(seg_num, seg_base, seg_name, proc_name, byte_offset, file = None):
                 s = s + ' seg%d' % parm
             elif flags['code']:
                 t = byte_offset + len(ibytes) + parm
-                s = s + ' %s+%04x' % (seg_name, t)
-                add_label(seg_base, t, '%s.%s.%02x' % (seg_name, proc_name, next_label_num))
+                label = '%s.%s.%02x' % (seg_name, proc_name, next_label_num)
+                s = s + ' %s\t; %s+%04x' % (label, seg_name, t)
+                add_label(seg_base, t, label)
                 next_label_num += 1
             elif flags['intermediate']:
                 s = s + ' intermediate %d' % parm
